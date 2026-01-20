@@ -1,0 +1,599 @@
+# VDI Patch Manager - Implementation Guide
+
+## Table of Contents
+1. [Overview](#overview)
+2. [Prerequisites](#prerequisites)
+3. [Installation & Configuration](#installation--configuration)
+4. [Setting Up Startup Execution](#setting-up-startup-execution)
+5. [File Share Structure](#file-share-structure)
+6. [Monitoring & Troubleshooting](#monitoring--troubleshooting)
+7. [Customization](#customization)
+8. [FAQ](#faq)
+
+---
+
+## Overview
+
+The VDI Patch Manager automates software updates for AWS Workspaces by:
+- Checking network file shares at every boot
+- Detecting newer application versions
+- Installing updates silently in the background
+- Maintaining detailed logs and version history
+- Supporting prod/non-prod network segmentation
+
+### Key Features
+✅ Runs automatically at Windows startup
+✅ Intelligent file share fallback (prod → non-prod)
+✅ Version tracking prevents redundant installations
+✅ Retry logic for failed installations
+✅ Comprehensive logging to `C:\temp\VDIupdates\log.txt`
+✅ Concurrent execution prevention via lock files
+✅ Supports Node.js, Git, Tomcat, IntelliJ, WinSCP, FileZilla, Notepad++, Wireshark
+
+---
+
+## Prerequisites
+
+### Required Permissions
+- **Local Administrator** rights on the Workspace
+- **Network access** to file shares (SMB/CIFS)
+- **PowerShell 5.1+** (included in Windows 10/11)
+
+### Network Requirements
+- File shares must be accessible via UNC paths (e.g., `\\server\share`)
+- Port 445 (SMB) must be open between Workspaces and file servers
+- DNS resolution for file server hostnames
+
+### File Share Permissions
+- **Read & Execute** permissions for Workspace users/computers
+- Recommended: Use a service account for consistent access
+
+---
+
+## Installation & Configuration
+
+### Step 1: Download the Script
+
+Save `VDI-Patch-Manager.ps1` to a location accessible by all Workspaces, such as:
+- `C:\Scripts\VDI-Patch-Manager.ps1`
+- Or: Place on a file share and copy locally during Workspace provisioning
+
+### Step 2: Configure File Share Paths
+
+Edit the script and update these lines (around line 30):
+
+```powershell
+$Global:Config = @{
+    # File Share Locations (UNC paths)
+    PrimaryShare   = "\\prod-fileserver\patches"      # ← CHANGE THIS
+    FallbackShare  = "\\nonprod-fileserver\patches"   # ← CHANGE THIS
+    
+    # Leave other settings as default unless customization needed
+}
+```
+
+**Example configurations:**
+
+```powershell
+# Single file share (no fallback)
+PrimaryShare   = "\\fs01.mycompany.com\software\patches"
+FallbackShare  = "\\fs01.mycompany.com\software\patches"  # Same as primary
+
+# Prod/Non-Prod segmentation
+PrimaryShare   = "\\prod-fs.mycompany.com\patches"
+FallbackShare  = "\\nonprod-fs.mycompany.com\patches"
+
+# IP-based paths (if DNS unavailable)
+PrimaryShare   = "\\10.20.30.40\patches"
+FallbackShare  = "\\10.20.30.50\patches"
+```
+
+### Step 3: Verify Script Execution Policy
+
+Open PowerShell as **Administrator** and run:
+
+```powershell
+# Check current policy
+Get-ExecutionPolicy
+
+# If Restricted, set to RemoteSigned (recommended)
+Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force
+```
+
+### Step 4: Test the Script Manually
+
+Before automating, test the script:
+
+```powershell
+# Run as Administrator
+cd C:\Scripts
+.\VDI-Patch-Manager.ps1
+```
+
+Check the output and log file:
+```powershell
+notepad C:\temp\VDIupdates\log.txt
+```
+
+---
+
+## Setting Up Startup Execution
+
+There are **two methods** to run the script at startup. Choose based on your requirements:
+
+### Method 1: Task Scheduler (Recommended)
+
+**Advantages:**
+- Runs with SYSTEM privileges (most reliable)
+- Can delay execution (e.g., 2 minutes after boot)
+- Built-in retry/failure handling
+- Centrally manageable via GPO
+
+**Setup Instructions:**
+
+1. Open **Task Scheduler** (`taskschd.msc`)
+
+2. Click **Create Task** (not "Create Basic Task")
+
+3. **General Tab:**
+   - Name: `VDI Patch Manager`
+   - Description: `Automatic software updates from file share`
+   - Select: **Run whether user is logged on or not**
+   - Select: **Run with highest privileges**
+   - Configure for: **Windows 10/Windows Server 2016** (or latest)
+
+4. **Triggers Tab:**
+   - Click **New...**
+   - Begin the task: **At startup**
+   - Delay task for: **2 minutes** (recommended - allows network to initialize)
+   - Enabled: ✓
+
+5. **Actions Tab:**
+   - Click **New...**
+   - Action: **Start a program**
+   - Program/script: `powershell.exe`
+   - Add arguments: 
+     ```
+     -NoProfile -ExecutionPolicy Bypass -File "C:\Scripts\VDI-Patch-Manager.ps1"
+     ```
+   - Start in: `C:\Scripts\`
+
+6. **Conditions Tab:**
+   - ✓ Start only if the following network connection is available: **Any connection**
+   - Un-check: "Start the task only if the computer is on AC power"
+
+7. **Settings Tab:**
+   - ✓ Allow task to be run on demand
+   - ✓ Run task as soon as possible after a scheduled start is missed
+   - ✓ If the task fails, restart every: **10 minutes**, Attempt to restart up to: **3 times**
+   - Stop the task if it runs longer than: **1 hour**
+
+8. Click **OK** and enter admin credentials if prompted
+
+**Test the scheduled task:**
+```powershell
+# Manual trigger
+schtasks /run /tn "VDI Patch Manager"
+
+# Check last run status
+Get-ScheduledTask -TaskName "VDI Patch Manager" | Get-ScheduledTaskInfo
+```
+
+---
+
+### Method 2: Startup Folder (Simpler, Less Reliable)
+
+**Advantages:**
+- Very simple setup
+- No configuration needed
+
+**Disadvantages:**
+- Runs under user context (not SYSTEM)
+- Requires user to be logged in
+- Visible PowerShell window briefly appears
+
+**Setup Instructions:**
+
+1. Create a batch file `C:\Scripts\RunPatchManager.bat`:
+
+```batch
+@echo off
+REM VDI Patch Manager Startup Script
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Scripts\VDI-Patch-Manager.ps1"
+```
+
+2. Create a shortcut to the batch file
+
+3. Place the shortcut in the **All Users** startup folder:
+   ```
+   C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\
+   ```
+
+**Or for current user only:**
+   ```
+   %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
+   ```
+
+---
+
+### Method 3: Group Policy Startup Script (Enterprise)
+
+For managing multiple Workspaces centrally:
+
+1. Open **Group Policy Management** (`gpmc.msc`)
+
+2. Edit the GPO linked to your Workspaces OU
+
+3. Navigate to:
+   ```
+   Computer Configuration → Policies → Windows Settings → Scripts (Startup/Shutdown)
+   ```
+
+4. Double-click **Startup**
+
+5. Click **PowerShell Scripts** tab → **Add...**
+
+6. Script Name: `\\yourserver\sysvol\scripts\VDI-Patch-Manager.ps1`
+
+7. Parameters: (leave empty)
+
+8. Click **OK** and apply the GPO
+
+**Note:** The script must be accessible during boot (SYSVOL or local path).
+
+---
+
+## File Share Structure
+
+### Recommended Directory Layout
+
+```
+\\prod-fileserver\patches\
+├── node-v20.11.0-x64.msi
+├── node-v22.1.0-x64.msi                    ← Script picks newest
+├── Git-2.43.0-64-bit.exe
+├── npp.8.6.2.Installer.x64.exe
+├── WinSCP-6.3.1-Setup.exe
+├── FileZilla_3.66.5_win64-setup.exe
+├── Wireshark-win64-4.2.2.exe
+├── apache-tomcat-9.0.86.zip
+├── apache-tomcat-10.1.19.zip
+├── apache-tomcat-11.0.0-M16.zip
+├── ideaIC-2024.1.exe                       ← IntelliJ Community
+└── ideaIU-2024.1.exe                       ← IntelliJ Ultimate
+```
+
+### File Naming Requirements
+
+The script uses **regex patterns** to detect versions. File names **must match** these patterns:
+
+| Application | Required Pattern | Version Extraction |
+|-------------|------------------|-------------------|
+| Node.js | `node-v*-x64.msi` | `node-v([0-9.]+)-x64.msi` |
+| Git | `Git-*-64-bit.exe` | `Git-([0-9.]+)-64-bit.exe` |
+| Notepad++ | `npp.*.Installer.x64.exe` | `npp.([0-9.]+).Installer.x64.exe` |
+| WinSCP | `WinSCP-*-Setup.exe` | `WinSCP-([0-9.]+)-Setup.exe` |
+| FileZilla | `FileZilla_*_win64-setup.exe` | `FileZilla_([0-9.]+)_win64-setup.exe` |
+| Wireshark | `Wireshark-win64-*.exe` | `Wireshark-win64-([0-9.]+).exe` |
+| Tomcat 9 | `apache-tomcat-9.*.zip` | `apache-tomcat-(9.[0-9.]+).zip` |
+| Tomcat 10 | `apache-tomcat-10.*.zip` | `apache-tomcat-(10.[0-9.]+).zip` |
+| IntelliJ CE | `ideaIC-*.exe` | `ideaIC-([0-9.]+).exe` |
+| IntelliJ UE | `ideaIU-*.exe` | `ideaIU-([0-9.]+).exe` |
+
+**Important:** If file names don't match these patterns, the script will **not** detect them!
+
+### Adding New Applications
+
+To add support for new applications:
+
+1. Edit the script's `$Global:Config.Applications` section (around line 37)
+
+2. Add a new entry:
+
+```powershell
+"myapp" = @{
+    Pattern = "MyApp-*-setup.exe"              # Search pattern
+    VersionRegex = "MyApp-([0-9.]+)-setup\.exe" # Version extraction
+    SilentArgs = "/VERYSILENT /NORESTART"      # Silent install flags
+    Installer = $null                           # Use EXE directly (not msiexec)
+}
+```
+
+3. Place the installer on the file share following the naming pattern
+
+4. Test: `.\VDI-Patch-Manager.ps1` and check logs
+
+---
+
+## Monitoring & Troubleshooting
+
+### Log Files
+
+All activity is logged to: **`C:\temp\VDIupdates\log.txt`**
+
+**Log levels:**
+- `[INFO]` - Normal operations
+- `[SUCCESS]` - Successful operations
+- `[WARNING]` - Non-critical issues
+- `[ERROR]` - Failures
+- `[DEBUG]` - Detailed diagnostic info
+
+**Example log entries:**
+
+```
+[2024-01-20 08:15:32] [INFO] ============================================================
+[2024-01-20 08:15:32] [INFO] STARTING VDI UPDATE PROCESS
+[2024-01-20 08:15:32] [SUCCESS] ✓ Successfully connected to: \\prod-fs\patches
+[2024-01-20 08:15:33] [INFO] Scanning file share for application installers...
+[2024-01-20 08:15:33] [SUCCESS]     ✓ Found: node-v22.1.0-x64.msi [v22.1.0]
+[2024-01-20 08:15:33] [INFO] UPDATE NEEDED: nodejs [20.11.0 → 22.1.0]
+[2024-01-20 08:15:45] [SUCCESS]   ✓ Installation successful (Exit Code: 0)
+[2024-01-20 08:15:45] [SUCCESS] ✓ nodejs v22.1.0 installed successfully
+```
+
+### Version Registry
+
+The script tracks installed versions in: **`C:\temp\VDIupdates\versions.json`**
+
+**Example contents:**
+
+```json
+{
+  "nodejs": "22.1.0",
+  "git_windows": "2.43.0",
+  "notepadpp": "8.6.2",
+  "winscp": "6.3.1"
+}
+```
+
+To **force reinstallation** of an app, edit this file and remove the version entry.
+
+### Common Issues
+
+#### 1. "No accessible file shares found"
+
+**Cause:** Network connectivity or permissions issue
+
+**Solutions:**
+- Test manually: `Test-Path "\\prod-fs\patches"`
+- Check network connectivity: `ping prod-fs.mycompany.com`
+- Verify SMB is enabled: `Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol`
+- Check firewall: Port 445 must be open
+- Verify permissions: User/computer must have Read access
+
+#### 2. "Installation failed (Exit Code: 1603)"
+
+**Cause:** MSI installation error
+
+**Solutions:**
+- Check detailed MSI log: `C:\temp\VDIupdates\install_appname_version.log`
+- Common causes:
+  - Insufficient disk space
+  - Conflicting process running
+  - User interaction required (not silent)
+  - Corrupted installer file
+
+#### 3. "Copy timed out after 300 seconds"
+
+**Cause:** Slow network or large file
+
+**Solution:** Increase timeout in script:
+
+```powershell
+CopyTimeout = 600  # Increase from 300 to 600 seconds (10 minutes)
+```
+
+#### 4. "Lock file is stale"
+
+**Cause:** Previous script run crashed
+
+**Solution:** The script auto-removes stale locks after 60 minutes. Or manually delete:
+
+```powershell
+Remove-Item C:\temp\VDIupdates\update.lock -Force
+```
+
+#### 5. Script doesn't run at startup
+
+**Cause:** Execution policy or task scheduler misconfiguration
+
+**Solutions:**
+- Check scheduled task status:
+  ```powershell
+  Get-ScheduledTask -TaskName "VDI Patch Manager"
+  ```
+- View last run result:
+  ```powershell
+  Get-ScheduledTask -TaskName "VDI Patch Manager" | Get-ScheduledTaskInfo
+  ```
+- Check Event Viewer:
+  - Applications and Services Logs → Microsoft → Windows → Task Scheduler → Operational
+- Verify execution policy: `Get-ExecutionPolicy -List`
+
+---
+
+## Customization
+
+### Adjusting Retry Behavior
+
+```powershell
+$Global:Config = @{
+    MaxRetries = 3           # Number of retry attempts (default: 3)
+    RetryDelaySeconds = 30   # Delay between retries (default: 30)
+}
+```
+
+### Changing Timeouts
+
+```powershell
+$Global:Config = @{
+    InstallTimeout = 600    # Max time per installation (default: 600 = 10 min)
+    CopyTimeout = 300       # Max time to copy from share (default: 300 = 5 min)
+}
+```
+
+### Disabling Specific Applications
+
+Comment out the application in the `Applications` hashtable:
+
+```powershell
+Applications = @{
+    "nodejs" = @{ ... }
+    # "git" = @{ ... }    ← Disabled (won't be checked or installed)
+    "notepadpp" = @{ ... }
+}
+```
+
+### Adding Silent Install Configurations for IntelliJ
+
+IntelliJ installers reference a silent config file. Create `C:\temp\VDIupdates\silent.config`:
+
+```
+mode=silent
+launcher32=0
+launcher64=1
+jre32=0
+jre64=1
+updatePATH=1
+updateContextMenu=1
+createDesktop=1
+createAssociations=0
+```
+
+### Customizing Log Rotation
+
+Logs auto-rotate when exceeding 10MB. To change this threshold:
+
+```powershell
+# In Initialize-Logging function
+if ($logSize -gt 20) {  # Change from 10 to 20 MB
+    # ...
+}
+```
+
+---
+
+## Best Practices
+
+### For Production Deployment
+
+1. **Test in non-prod first**
+   - Deploy to 1-2 test Workspaces
+   - Monitor logs for 1 week
+   - Verify all applications install correctly
+
+2. **Stage file share updates**
+   - Upload new installers to non-prod share first
+   - Test on non-prod Workspaces
+   - Promote to prod share after validation
+
+3. **Schedule maintenance windows**
+   - While script runs at startup, major updates (like IntelliJ) can take 10+ minutes
+   - Inform users of potential first-boot delays after new patches
+
+4. **Monitor centrally**
+   - Collect logs to central logging system (Splunk, ELK, etc.)
+   - Alert on repeated failures
+   - Track version compliance across fleet
+
+5. **Version control the script**
+   - Keep script in Git repository
+   - Document all customizations
+   - Use CI/CD to deploy updates
+
+### Security Considerations
+
+1. **File Share Permissions**
+   - Grant **Read-Only** access (never Write)
+   - Use separate service account with minimal privileges
+   - Log file share access for audit trail
+
+2. **Script Integrity**
+   - Digitally sign the PowerShell script
+   - Store in read-only location
+   - Use AppLocker/WDAC to prevent tampering
+
+3. **Installer Verification**
+   - Download installers from official sources only
+   - Verify checksums/signatures before uploading to share
+   - Scan with antivirus before deployment
+
+4. **Credential Management**
+   - Never hardcode credentials in script
+   - Use Windows Integrated Authentication for file shares
+   - Consider Credential Guard for sensitive environments
+
+---
+
+## FAQ
+
+### Q: Can I run this on non-AWS Workspaces (e.g., Azure, on-prem)?
+**A:** Yes! The script works on any Windows 10/11 system with network file share access.
+
+### Q: How do I know which applications were updated?
+**A:** Check the log file. Lines starting with `✓ [APP] v[VERSION] installed successfully` indicate successful updates.
+
+### Q: Can I install applications that aren't on the list?
+**A:** Yes, add them to the `Applications` configuration section. See "Adding New Applications" above.
+
+### Q: What happens if the file share is unavailable?
+**A:** The script fails gracefully, logs the error, and exits. It will retry on the next boot.
+
+### Q: Does this support x86 (32-bit) installers?
+**A:** No, by default it's configured for x64. You can add x86 patterns to support both architectures.
+
+### Q: Can I run this on a schedule (e.g., daily) instead of at startup?
+**A:** Yes! Modify the scheduled task trigger to "Daily" instead of "At startup". This is useful for always-on Workspaces.
+
+### Q: How do I uninstall an application managed by this script?
+**A:** Use Windows Settings → Apps → Uninstall as normal. The script only *installs* applications; it doesn't manage uninstallation.
+
+### Q: What if I need to rollback to an older version?
+**A:** Replace the installer on the file share with the older version (following naming conventions), then edit `versions.json` on the Workspace to remove the app entry. On next boot, it will "upgrade" to the older version.
+
+### Q: Can I use this with SCCM/Intune/other MDM?
+**A:** Yes, but it may be redundant. Use this script if you need:
+- Offline/disconnected Workspace support
+- Simpler file share-based deployment
+- Custom update cadence per environment
+
+Otherwise, native MDM tools may be more appropriate.
+
+---
+
+## Support & Contribution
+
+### Getting Help
+
+1. **Check the logs first:** `C:\temp\VDIupdates\log.txt`
+2. **Enable debug mode:** Run manually with verbose output
+3. **Review this documentation thoroughly**
+
+### Reporting Issues
+
+When reporting problems, include:
+- Full log file contents
+- PowerShell version: `$PSVersionTable`
+- Windows version: `winver`
+- Network configuration (file share paths, connectivity)
+
+---
+
+## Changelog
+
+### Version 1.0 (2024-01-20)
+- Initial release
+- Support for 10 common developer tools
+- Prod/non-prod file share fallback
+- Retry logic and comprehensive logging
+- Startup execution via Task Scheduler
+
+---
+
+## License
+
+This script is provided as-is for use in AWS Workspaces environments. Modify and distribute freely.
+
+---
+
+**End of Documentation**
