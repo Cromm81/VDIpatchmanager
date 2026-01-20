@@ -1,0 +1,241 @@
+# VDI Patch Manager - Quick Start Guide
+
+## 🚀 5-Minute Setup
+
+### Step 1: Edit the Script (30 seconds)
+
+Open `VDI-Patch-Manager.ps1` and change lines 30-31:
+
+```powershell
+PrimaryShare   = "\\YOUR-PROD-SERVER\patches"      # ← Change this
+FallbackShare  = "\\YOUR-NONPROD-SERVER\patches"   # ← Change this
+```
+
+**Example:**
+```powershell
+PrimaryShare   = "\\fs01.company.com\software\patches"
+FallbackShare  = "\\fs01.company.com\software\patches"
+```
+
+### Step 2: Copy Script to Workspace (30 seconds)
+
+```powershell
+# Create directory
+New-Item -Path "C:\Scripts" -ItemType Directory -Force
+
+# Copy script
+Copy-Item "VDI-Patch-Manager.ps1" -Destination "C:\Scripts\"
+```
+
+### Step 3: Set Execution Policy (30 seconds)
+
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force
+```
+
+### Step 4: Create Scheduled Task (3 minutes)
+
+Run this PowerShell command **as Administrator**:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\Scripts\VDI-Patch-Manager.ps1"
+
+$trigger = New-ScheduledTaskTrigger -AtStartup
+$trigger.Delay = "PT2M"  # 2-minute delay
+
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10)
+
+Register-ScheduledTask -TaskName "VDI Patch Manager" `
+    -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+    -Description "Automatic software updates from file share"
+```
+
+### Step 5: Test (1 minute)
+
+```powershell
+# Run manually
+schtasks /run /tn "VDI Patch Manager"
+
+# View log
+notepad C:\temp\VDIupdates\log.txt
+```
+
+---
+
+## 📁 File Share Setup
+
+Create this structure on your file server:
+
+```
+\\server\patches\
+├── node-v22.1.0-x64.msi
+├── Git-2.43.0-64-bit.exe
+├── npp.8.6.2.Installer.x64.exe
+├── WinSCP-6.3.1-Setup.exe
+├── FileZilla_3.66.5_win64-setup.exe
+├── Wireshark-win64-4.2.2.exe
+├── apache-tomcat-9.0.86.zip
+├── apache-tomcat-10.1.19.zip
+└── ideaIC-2024.1.exe
+```
+
+**Permissions:**
+- Domain Computers: **Read & Execute**
+- Domain Users: **Read & Execute**
+
+---
+
+## ✅ Verification Checklist
+
+- [ ] File shares are accessible: `Test-Path "\\server\patches"`
+- [ ] Script location: `C:\Scripts\VDI-Patch-Manager.ps1`
+- [ ] Execution policy: `Get-ExecutionPolicy` shows "RemoteSigned" or "Unrestricted"
+- [ ] Scheduled task created: `Get-ScheduledTask -TaskName "VDI Patch Manager"`
+- [ ] Manual test successful: Check `C:\temp\VDIupdates\log.txt`
+- [ ] Reboot test: Restart Workspace and verify updates run automatically
+
+---
+
+## 🔍 Troubleshooting
+
+### Script doesn't run at startup
+```powershell
+# Check task status
+Get-ScheduledTask -TaskName "VDI Patch Manager" | Get-ScheduledTaskInfo
+
+# View last run result (should be 0 for success)
+(Get-ScheduledTask -TaskName "VDI Patch Manager" | Get-ScheduledTaskInfo).LastTaskResult
+```
+
+### File share not accessible
+```powershell
+# Test connectivity
+Test-Path "\\server\patches"
+
+# Test with full path
+Test-Path "\\server\patches\node-v22.1.0-x64.msi"
+
+# Check SMB
+Get-SmbConnection
+```
+
+### Installations failing
+```powershell
+# View detailed log
+Get-Content C:\temp\VDIupdates\log.txt -Tail 50
+
+# Check version registry
+Get-Content C:\temp\VDIupdates\versions.json | ConvertFrom-Json | Format-Table
+
+# View MSI install logs
+Get-ChildItem C:\temp\VDIupdates\install_*.log | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Get-Content -Tail 20
+```
+
+---
+
+## 📊 Monitoring Commands
+
+```powershell
+# View latest log entries
+Get-Content C:\temp\VDIupdates\log.txt -Tail 30 -Wait
+
+# Check what's installed
+Get-Content C:\temp\VDIupdates\versions.json | ConvertFrom-Json
+
+# Force manual run
+schtasks /run /tn "VDI Patch Manager"
+
+# Check for errors in log
+Select-String -Path C:\temp\VDIupdates\log.txt -Pattern "ERROR" | Select-Object -Last 10
+```
+
+---
+
+## 🔧 Common Customizations
+
+### Change file share paths
+Edit script lines 30-31
+
+### Add new application
+Edit script section starting at line 37, add entry like:
+```powershell
+"myapp" = @{
+    Pattern = "MyApp-*-setup.exe"
+    VersionRegex = "MyApp-([0-9.]+)-setup\.exe"
+    SilentArgs = "/VERYSILENT /NORESTART"
+    Installer = $null
+}
+```
+
+### Increase retry attempts
+Edit script line 46:
+```powershell
+MaxRetries = 5  # Change from 3 to 5
+```
+
+### Run daily instead of at startup
+```powershell
+# Delete startup task
+Unregister-ScheduledTask -TaskName "VDI Patch Manager" -Confirm:$false
+
+# Create daily task
+$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -File C:\Scripts\VDI-Patch-Manager.ps1"
+
+$trigger = New-ScheduledTaskTrigger -Daily -At 3AM
+
+$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+Register-ScheduledTask -TaskName "VDI Patch Manager" `
+    -Action $action -Trigger $trigger -Principal $principal
+```
+
+---
+
+## 📝 File Naming Requirements
+
+| App | Required Format | Example |
+|-----|----------------|---------|
+| Node.js | `node-v*-x64.msi` | `node-v22.1.0-x64.msi` |
+| Git | `Git-*-64-bit.exe` | `Git-2.43.0-64-bit.exe` |
+| Notepad++ | `npp.*.Installer.x64.exe` | `npp.8.6.2.Installer.x64.exe` |
+| WinSCP | `WinSCP-*-Setup.exe` | `WinSCP-6.3.1-Setup.exe` |
+| FileZilla | `FileZilla_*_win64-setup.exe` | `FileZilla_3.66.5_win64-setup.exe` |
+| Wireshark | `Wireshark-win64-*.exe` | `Wireshark-win64-4.2.2.exe` |
+| Tomcat 9/10 | `apache-tomcat-9.*.zip` | `apache-tomcat-9.0.86.zip` |
+| IntelliJ CE | `ideaIC-*.exe` | `ideaIC-2024.1.exe` |
+| IntelliJ UE | `ideaIU-*.exe` | `ideaIU-2024.1.exe` |
+
+**⚠️ Files MUST match these patterns exactly or they won't be detected!**
+
+---
+
+## 🎯 What Happens on Boot
+
+1. **Check for lock file** (prevents duplicate runs)
+2. **Test file share connectivity** (prod → fallback)
+3. **Scan for installers** on accessible share
+4. **Compare versions** with local registry
+5. **Copy new installers** to local temp
+6. **Install silently** with retry logic
+7. **Update version registry**
+8. **Clean up** temp files
+9. **Write detailed log**
+
+---
+
+## 🆘 Getting Help
+
+**Log file location:** `C:\temp\VDIupdates\log.txt`
+**Version registry:** `C:\temp\VDIupdates\versions.json`
+**Full documentation:** See `VDI-Patch-Manager-Documentation.md`
+
+---
+
+**You're all set! 🎉**
+
+Reboot your Workspace and check the log file to verify automatic updates are working.
